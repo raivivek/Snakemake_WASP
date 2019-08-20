@@ -15,5 +15,12 @@ accordingly. Also, Snakemake file (`src/Snakefile`) requires a list of output fi
 process based on which it generates the tree. Edit the relevant rule (`rule all`)
 accordingly.
 
+
+### Running
+
+Use the `Makefile` to test commands. `make dry_run` executes a dry run of Snakemake which
+is useful for  debugging. `make run` submits the job to cluster through Slurm. You should
+edit these rules depending on your system.
+
 ### Contact
 Vivek Rai, vivekrai@umich.edu
