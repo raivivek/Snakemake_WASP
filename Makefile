@@ -14,19 +14,19 @@ dry_run:
 	# -n: dry-run only
 	# -r: output reason
 	# -p: commands run
-	@snakemake -npr \ 
-		--jn "snakejob.{jobid}" \
+	@snakemake -npr \
+		--jn "wasp.{jobid}" \
 		--snakefile src/Snakefile \
 		--configfile config/config.yaml
 
 run:
-	# nohup: run in background 
+	# nohup: run in background
 	# -j: maximum number of jobs to put in queue
 	#	--keep-going: keep going with independent jobs if some fail
 	# --rerun-incomplete: re-run any incomplete rules
-	@nohup snakemake \ 
-		--jn "snakejob.{jobid}" \
-		-j 999 \ 
+	@nohup snakemake \
+		--jn "wasp.{jobid}" \
+		-j 999 \
 		--keep-going \
 		--rerun-incomplete \
 		--snakefile src/Snakefile \

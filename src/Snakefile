@@ -4,42 +4,171 @@ from functools import partial
 from collections import defaultdict
 
 # sanity check; exit early if paths are not set properly
-ROOT = config['root'] or os.getenv('ROOT')
-if not ROOT:
-  print("Project ROOT not set. Check config. Exiting.")
+if not config.get("results", False):
+  print("Check config. `results` not set. Exiting.")
   exit(1)
 
-data = partial(os.path.join, ROOT, 'data')
-work = partial(os.path.join, ROOT, 'work')
+_data = partial(os.path.join, "data")
+_results = partial(os.path.join, config["results"], "wasp")
 
 #
-# contains list of target output files 
-FINAL = [] 
-
-# extend output
-# for example,
-#
-# FINAL.extend(
-#    ['tmp.py', 'hello.py']
-# )
-
-#
-# main rule, specify list of files to be generated
+# NOTE: main rule, specify list of files to be generated
 rule all:
   input:
-    FINAL
+    #expand(_results("clipped", "{sample}.clipped.bam"), sample=SAMPLES)
 
-# sub-rules
 
+rule vcf2h5:
+  """Convert VCF data files to HDF5 format"""
+  input:
+    vcfs = glob.glob(config["vcf_dir"], "/*.vcf.gz")
+  output:
+    snp_index = _results("snps", "snp_index.h5"),
+    snp_tab = _results("snps", "snp_tab.h5"),
+    haplotype = _results("snps", "haplotype.h5")
+  params:
+    chrom = config["chrom_sizes"]
+  shell:
+    """
+      {config[wasp_dir]}/snp2h5/snp2h5 \
+        --chrom {params.chrom} \
+        --format vcf \
+        --snp_index {output.snp_index} \
+        --snp_tab {output.snp_tab} \
+        --haplotype {output.haplotype} \
+        {input.vcfs}
+    """
+
+
+rule find_intersecting_snps_paired_end:
+  """find intersecting SNPs using WASP script"""
+  input:
+      bam = _data("bams", "{sample}.bam"),
+      snp_index = _results("snps", "snp_index.h5"),
+      snp_tab = _results("snps",  "snp_tab.h5"),
+      haplotype = _results("snps", "haplotype.h5")
+  output:
+      fastq1 = _results("find_intersecting_snps", "{sample}.remap.fq1.gz"),
+      fastq2 = _results("find_intersecting_snps", "{sample}.remap.fq2.gz"),
+      keep_bam = _results("find_intersecting_snps", "{sample}.keep.bam"),
+      remap_bam = _results("find_intersecting_snps", "{sample}.to.remap.bam")
+  params:
+      outdir = _results("find_intersecting_snps")
+  shell:
+    """
+      python {config[wasp_dir]}/mapping/find_intersecting_snps.py \
+          --is_paired_end \
+          --is_sorted \
+          --output_dir {params.outdir} \
+          --snp_tab {input.snp_tab} \
+          --snp_index {input.snp_index} \
+          --haplotype {input.haplotype} \
+          {input.bam}
+    """
+
+
+rule remap_overlapping_reads:
+  """Remap reads that overlapped a heterozygous site"""
+  input:
+      fastq1 = _results("find_intersecting_snps", "{sample}.remap.fq1.gz")
+      fastq2 = _results("find_intersecting_snps", "{sample}.remap.fq2.gz"),
+      index = config["bwa_index"]
+  output:
+      _results("remapped", "{sample}.bam")
+  params:
+      rg = "\\t".join(["@RG", "LB:{sample}"]),
+      quality = 10
+  shell:
+    """
+      bwa mem             \
+          -M              \
+          -R              \
+          \"{params.rg}\" \
+          -I 200,200,5000 \
+          -t {threads}    \
+          {input.index}   \
+          {input.fastq1}   \
+          {input.fastq2}  \
+      | samtools view -b -q {params.quality} - \
+      | samtools sort -m 2G -@ {threads} -O bam -o {output} -
+
+      samtools index {output}
+    """
+
+
+rule filter_remapped:
+  """Filter the reads that remapped correctly. We want to keep these."""
+  input:
+    to_remap = _results("find_intersecting_snps", "{sample}.to.remap.bam"),
+    remapped = _results("remapped", "{sample}.bam")
+  output:
+    keep_after_remapping = _results("filter_remapped", "{sample}.keep.bam")
+  shell:
+    """
+      python {config[wasp_dir]}/mapping/filter_remapped_reads.py \
+          {input.to_remap} {input.remapped} {output.keep_after_remapping}"
+    """
+
+
+rule merge_bams:
+  """Merge the reads that did not need re-mapping with the reads that re-mapped correctly
+  in the second mapping stage."""
+  input:
+    keep_after_remapping = _results("filter_remapped", "{sample}.keep.bam"),
+    no_remapping_needed = _results("find_intersecting_snps", "{sample}.keep.bam")
+  output:
+    keep_merged = _results("merged_keep", "{sample}.merged.bam")
+  params:
+    name = "{sample}.merged.bam",
+    tmp_dir = config.get("tmp_dir", _results("merged_keep"))
+  shell:
+    """
+      samtools merge {params.tmp_dir}/{params.name} \
+        {input.keep_after_remapping} {input.no_remapping_needed}
+
+      samtools sort -m 2G -@ {threads} \
+        -O bam -o {output.keep_merged} {params.tmp_dir}/{params.name}
+
+      rm {params.tmp_dir}/{params.name}
+      samtools index {output.keep_merged}
+    """
+
+
+rule rmdup:
+  input:
+    _results("merged_keep", "{sample}.merged.bam")
+  output:
+    _results("rmdup", "{sample}.rmdup.merged.bam")
+  shell:
+    """ python {config[wasp_dir]}/mapping/rmdup_pe.py {input} {output} """
+
+
+rule clip_index_overlaps:
+  """Clip read overlaps: When two reads overlap a het site, the SNP read-count
+  will be erroneous. `ClipOverlap` trims one of the reads (typically the one with
+  lower quality) to fix this."""
+  input:
+    _results("rmdup", "{sample}.rmdup.merged.bam")
+  output:
+    sort = _results("rmdup", "{sample}.rmdup.merged.sorted.bam"),
+    clip = _results("clipped", "{sample}.clipped.bam")
+  threads: 2
+  shell:
+    """
+      samtools sort -m 2G -@ {threads} {input} > {output.sort}
+
+      bam clipOverlap --poolSize 9000000 --in {output.sort} --out {output.clip}
+      samtools index {output.clip}
+    """
 
 # Snakemake notification
 onerror:
   print("Error: Snakemake aborted!")
-  shell("mail -s 'Snakemake Job Error: See log inside!' {config[email]} < {log}")
+  shell("mail -s "Snakemake Job Error: See log inside!" {config[email]} < {log}")
 
 
 onsuccess:
   print("Success: Snakemake completed!")
-  shell("mail -s 'Snakemake Job Completed: Have a Beer!' {config[email]} < {log}")
+  shell("mail -s "Snakemake Job Completed: Have a Beer!" {config[email]} < {log}")
 
 # vim: syntax=snakemake

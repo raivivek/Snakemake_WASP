@@ -1,2 +1,7 @@
-root: "."
-email: "vivekrai@umich.edu"
+wasp_dir: /home/vivekrai/sw/WASP
+bwa_index: /lab/data/reference/human/hg19/index/bwa/current/
+chrom_sizes: /lab/data/reference/human/hg19/hg19.chrom_sizes
+vcf_dir:
+data:
+results:
+email: "example@host.example.com"
